@@ -1,7 +1,8 @@
-import requests
+import aiohttp
 import json
 import re
 import time
+import asyncio
 from app.config import TOKEN_SETS # Import new structure
 
 HEADERS = {
@@ -45,7 +46,7 @@ class Clr:
     ENDC = '\033[0m'
     BOLD = '\033[1m'
 
-def resolve_uid(username):
+async def resolve_uid(username):
     url = f"https://locket.cam/{username}"
     headers = {
         "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X)",
@@ -53,45 +54,49 @@ def resolve_uid(username):
     }
     
     try:
-        res = requests.get(url, headers=headers, allow_redirects=True, timeout=10)
-        html = res.text
-        
-        def extract(text):
-            if not text: return None
-            m = re.search(r'/invites/([A-Za-z0-9]{28})', text)
-            if m: return m.group(1)
-            
-            lp = re.search(r'link=([^\s"\'>]+)', text)
-            if lp:
-                try:
-                    d = requests.utils.unquote(lp.group(1))
-                    dm = re.search(r'/invites/([A-Za-z0-9]{28})', d)
-                    if dm: return dm.group(1)
-                except:
-                    pass
-            return None
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=headers, allow_redirects=True, timeout=10) as res:
+                html = await res.text()
+                redirect_url = str(res.url)
 
-        return extract(res.url) or extract(html)
+                def extract(text):
+                    if not text: return None
+                    m = re.search(r'/invites/([A-Za-z0-9]{28})', text)
+                    if m: return m.group(1)
+                    
+                    lp = re.search(r'link=([^\s"\'>]+)', text)
+                    if lp:
+                        try:
+                            # Basic URL decode without urllib
+                            d = lp.group(1).replace('%3A', ':').replace('%2F', '/')
+                            dm = re.search(r'/invites/([A-Za-z0-9]{28})', d)
+                            if dm: return dm.group(1)
+                        except:
+                            pass
+                    return None
+
+                return extract(redirect_url) or extract(html)
         
     except Exception:
         return None
 
-def check_status(uid):
+async def check_status(uid):
     url = f"https://api.revenuecat.com/v1/subscribers/{uid}"
     try:
-        res = requests.get(url, headers=HEADERS, timeout=10)
-        if 200 <= res.status_code < 300:
-            data = res.json()
-            entitlements = data.get('subscriber', {}).get('entitlements', {}).get('Gold', {})
-            if entitlements:
-                expires_date = entitlements.get('expires_date')
-                return {"active": True, "expires": expires_date}
-            return {"active": False}
-        return {"active": False}
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=HEADERS, timeout=10) as res:
+                if 200 <= res.status < 300:
+                    data = await res.json()
+                    entitlements = data.get('subscriber', {}).get('entitlements', {}).get('Gold', {})
+                    if entitlements:
+                        expires_date = entitlements.get('expires_date')
+                        return {"active": True, "expires": expires_date}
+                    return {"active": False}
+                return {"active": False}
     except Exception:
         return None
 
-def inject_gold(uid, token_config, log_callback=None):
+async def inject_gold(uid, token_config, log_callback=None):
     def log(msg):
         if log_callback:
             log_callback(msg)
@@ -137,45 +142,48 @@ def inject_gold(uid, token_config, log_callback=None):
     log(f"{Clr.BLUE}[*] Loading Exploit Payload (RevenueCat)...{Clr.ENDC}")
     log(f"{Clr.BLUE}[*] Using Token Set: {token_config.get('name', 'Custom')}{Clr.ENDC}")
 
-    for attempt in range(5):
-        try:
-            log(f"{Clr.WARNING}[>] Attempt {attempt+1}/5:{Clr.ENDC} Sending Receipt...")
-            res = requests.post(url, headers=current_headers, json=body, timeout=15)
-            
-            if res.status_code == 200:
-                log(f"{Clr.GREEN}[+] HTTP 200 OK.{Clr.ENDC} Verifying Entitlement...")
-                status = check_status(uid)
-                if status and status.get('active'):
-                    log(f"{Clr.GREEN}[SUCCESS] Gold Entitlement Active!{Clr.ENDC}")
-                    return True, "SUCCESS"
-                else:
-                    log(f"{Clr.WARNING}[!] Entitlement not found immediately. Retrying verification...{Clr.ENDC}")
-                    time.sleep(2)
-                    status = check_status(uid)
-                    if status and status.get('active'):
-                        log(f"{Clr.GREEN}[SUCCESS] Gold Active after delay.{Clr.ENDC}")
-                        return True, "SUCCESS"
-                    log(f"{Clr.FAIL}[-] Exploitation Failed: Valid receipt but no Gold.{Clr.ENDC}")
-                    return False, "Accepted but NO Gold (Expired?)"
+    async with aiohttp.ClientSession() as session:
+        for attempt in range(5):
+            try:
+                log(f"{Clr.WARNING}[>] Attempt {attempt+1}/5:{Clr.ENDC} Sending Receipt...")
+                async with session.post(url, headers=current_headers, json=body, timeout=15) as res:
+                    status_code = res.status
                     
-            elif res.status_code == 529:
-                log(f"{Clr.WARNING}[!] Server Busy (529). Cooldown 2s...{Clr.ENDC}")
-                time.sleep(2)
-                continue
-                
-            else:
-                msg = "Unknown Error"
-                try:
-                    msg = res.json().get('message', str(res.status_code))
-                except:
-                    msg = str(res.status_code)
-                log(f"{Clr.FAIL}[x] Request Rejected: {msg}{Clr.ENDC}")
-                return False, f"Rejected: {msg}"
-                
-        except Exception as e:
-            log(f"{Clr.FAIL}[!] Network Error: {e}{Clr.ENDC}")
-            if attempt == 4:
-                return False, f"Request Error: {str(e)}"
-            time.sleep(2)
+                    if status_code == 200:
+                        log(f"{Clr.GREEN}[+] HTTP 200 OK.{Clr.ENDC} Verifying Entitlement...")
+                        status = await check_status(uid)
+                        if status and status.get('active'):
+                            log(f"{Clr.GREEN}[SUCCESS] Gold Entitlement Active!{Clr.ENDC}")
+                            return True, "SUCCESS"
+                        else:
+                            log(f"{Clr.WARNING}[!] Entitlement not found immediately. Retrying verification...{Clr.ENDC}")
+                            await asyncio.sleep(2)
+                            status = await check_status(uid)
+                            if status and status.get('active'):
+                                log(f"{Clr.GREEN}[SUCCESS] Gold Active after delay.{Clr.ENDC}")
+                                return True, "SUCCESS"
+                            log(f"{Clr.FAIL}[-] Exploitation Failed: Valid receipt but no Gold.{Clr.ENDC}")
+                            return False, "Accepted but NO Gold (Expired?)"
+                            
+                    elif status_code == 529:
+                        log(f"{Clr.WARNING}[!] Server Busy (529). Cooldown 2s...{Clr.ENDC}")
+                        await asyncio.sleep(2)
+                        continue
+                        
+                    else:
+                        msg = "Unknown Error"
+                        try:
+                            resp_json = await res.json()
+                            msg = resp_json.get('message', str(status_code))
+                        except:
+                            msg = str(status_code)
+                        log(f"{Clr.FAIL}[x] Request Rejected: {msg}{Clr.ENDC}")
+                        return False, f"Rejected: {msg}"
+                    
+            except Exception as e:
+                log(f"{Clr.FAIL}[!] Network Error: {e}{Clr.ENDC}")
+                if attempt == 4:
+                    return False, f"Request Error: {str(e)}"
+                await asyncio.sleep(2)
             
     return False, "Timeout / Failed after retries"

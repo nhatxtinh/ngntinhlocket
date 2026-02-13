@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import random
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ForceReply
 from telegram.constants import ParseMode
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
@@ -95,6 +96,7 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"━━━━━━━━━━━━━━━━━━━\n"
         f"{E_ANDROID} <b>Active Workers</b>: {NUM_WORKERS}\n"
         f"🔑 <b>Token Sets</b>: {len(TOKEN_SETS)}\n"
+        f"⏳ <b>Queue Size</b>: {request_queue.qsize()}\n"
     )
     await update.message.reply_text(msg, parse_mode=ParseMode.HTML)
 
@@ -238,7 +240,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     msg = await update.message.reply_text(T("resolving", lang), parse_mode=ParseMode.HTML)
     
-    uid = await asyncio.to_thread(locket.resolve_uid, username)
+    uid = await locket.resolve_uid(username)
     if not uid:
         await msg.edit_text(T("not_found", lang), parse_mode=ParseMode.HTML)
         return
@@ -249,7 +251,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
         
     await msg.edit_text(T("checking_status", lang), parse_mode=ParseMode.HTML)
-    status = await asyncio.to_thread(locket.check_status, uid)
+    status = await locket.check_status(uid)
     
     status_text = T("free_status", lang)
     if status and status.get("active"):
@@ -392,7 +394,7 @@ async def queue_worker(app, worker_id):
             async with queue_lock:
                 if item in pending_items:
                     pending_items.remove(item)
-                await update_pending_positions(app)
+                await update_pending_positions(app) # Enabled queue updates
             
             print(f"{Clr.BLUE}[Worker #{worker_id}][{token_name}] Processing:{Clr.ENDC} UID={uid} | UserID={user_id}")
             
@@ -447,7 +449,7 @@ async def queue_worker(app, worker_id):
             await update_log_ui()
             
             # Use dynamic token config
-            success, msg_result = await asyncio.to_thread(locket.inject_gold, uid, token_config, safe_log_callback)
+            success, msg_result = await locket.inject_gold(uid, token_config, safe_log_callback)
             
             # Log request to DB
             db.log_request(user_id, uid, "SUCCESS" if success else "FAIL")
@@ -456,7 +458,7 @@ async def queue_worker(app, worker_id):
                 if user_id != ADMIN_ID:
                     db.increment_usage(user_id)
                     
-                pid, link = await asyncio.to_thread(nextdns.create_profile, NEXTDNS_KEY, safe_log_callback)
+                pid, link = await nextdns.create_profile(NEXTDNS_KEY, safe_log_callback)
                 
                 dns_text = ""
                 if link:
